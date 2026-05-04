@@ -125,3 +125,71 @@ def test_walls_attached_to_symbol() -> None:
         assert len(sym["walls"]) == 1
         assert sym["walls"][0]["price"] == 79700.0
         assert sym["walls"][0]["state"] == "ACTIVE"
+
+
+# ----------------------------------------------------- v2: heatmap extras
+def test_sparkline_passes_through_short_history() -> None:
+    state = WebState(_cfg())
+    book = _book()
+    # Manually populate short mid_history; snapshot should expose it raw.
+    book.mid_history = [(i * 1000, 79900.0 + i) for i in range(10)]
+    state.symbols = ["BTCUSDT"]
+    state.books = {"BTCUSDT": book}
+    app = make_app(state)
+    with TestClient(app) as client:
+        sym = client.get("/api/state").json()["symbols"][0]
+        assert "sparkline" in sym
+        assert len(sym["sparkline"]) == 10
+        assert sym["sparkline"][0] == 79900.0
+        assert sym["sparkline"][-1] == 79909.0
+
+
+def test_sparkline_downsamples_long_history() -> None:
+    state = WebState(_cfg())
+    book = _book()
+    # 600 samples → must compress to ≤60 (the dashboard target).
+    book.mid_history = [(i * 100, 79900.0 + (i % 10)) for i in range(600)]
+    state.symbols = ["BTCUSDT"]
+    state.books = {"BTCUSDT": book}
+    app = make_app(state)
+    with TestClient(app) as client:
+        sym = client.get("/api/state").json()["symbols"][0]
+        assert 0 < len(sym["sparkline"]) <= 60
+
+
+def test_modes_listed_in_snapshot() -> None:
+    state = WebState(_cfg())
+    state.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    state.modes = {"BTCUSDT": "btc", "ETHUSDT": "eth", "SOLUSDT": "alts"}
+    state.books = {
+        "BTCUSDT": _book(), "ETHUSDT": _book(), "SOLUSDT": _book(),
+    }
+    app = make_app(state)
+    with TestClient(app) as client:
+        data = client.get("/api/state").json()
+        assert sorted(data["modes"]) == ["alts", "btc", "eth"]
+
+
+def test_iceberg_stats_in_snapshot() -> None:
+    """When the iceberg detector is wired up, its counters are exposed."""
+    from walls.iceberg import IcebergDetector
+    from walls.settings import IcebergCfg
+    cfg = IcebergCfg(
+        enabled=True, min_visible_usd=1000.0, max_distance_pct=0.0,
+        eat_threshold_ratio=0.30, regen_window_sec=5.0,
+        regen_match_lo=0.7, regen_match_hi=1.4, min_regens=2,
+        lookback_sec=60.0, cooldown_ttl_sec=300.0,
+        require_trade_confirmation=True,
+        trade_window_ms=2000, trade_min_qty_ratio=0.30,
+    )
+    det = IcebergDetector(cfg)
+    det.confirmed_count = 7
+    det.rejected_spoof_count = 3
+    state = WebState(_cfg())
+    state.iceberg = det
+    app = make_app(state)
+    with TestClient(app) as client:
+        data = client.get("/api/state").json()
+        assert data["iceberg_stats"]["confirmed"] == 7
+        assert data["iceberg_stats"]["rejected_spoof"] == 3
+        assert data["iceberg_stats"]["anti_spoof"] is True

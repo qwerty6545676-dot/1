@@ -122,6 +122,12 @@ class IcebergCfg:
     qty restores to between ``regen_match_lo`` and ``regen_match_hi`` of the
     eaten qty. After ``min_regens`` regens within ``lookback_sec``, an
     IcebergEvent is emitted (subject to ``cooldown_ttl_sec``).
+
+    Anti-spoofing: when ``require_trade_confirmation`` is True, a regen is
+    only counted if the eat was matched by real trades on that level within
+    ``trade_window_ms``. ``trade_min_qty_ratio`` is the minimum traded qty as
+    a fraction of the eaten qty (e.g. 0.3 = at least 30% of the level was
+    actually filled). Without confirmation the eat is treated as a cancel.
     """
 
     enabled: bool
@@ -134,6 +140,9 @@ class IcebergCfg:
     min_regens: int
     lookback_sec: float
     cooldown_ttl_sec: float
+    require_trade_confirmation: bool
+    trade_window_ms: int
+    trade_min_qty_ratio: float
 
 
 @dataclass(frozen=True)
@@ -269,6 +278,9 @@ def load(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         min_regens=_env_int("ICEBERG_MIN_REGENS", 4),
         lookback_sec=_env_float("ICEBERG_LOOKBACK_SEC", 600.0),
         cooldown_ttl_sec=_env_float("ICEBERG_COOLDOWN_TTL_SEC", 1800.0),
+        require_trade_confirmation=_env_bool("ICEBERG_REQUIRE_TRADE_CONFIRMATION", True),
+        trade_window_ms=_env_int("ICEBERG_TRADE_WINDOW_MS", 2000),
+        trade_min_qty_ratio=_env_float("ICEBERG_TRADE_MIN_QTY_RATIO", 0.30),
     )
 
     web = WebCfg(

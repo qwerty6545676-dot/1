@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 # Signature: (side, price, old_qty, new_qty, ts_ms) -> None
 LevelChangeCallback = Callable[[str, float, float, float, int], None]
@@ -25,12 +26,17 @@ class OrderBook:
     last_update_id: int = 0
     last_event_ts_ms: int = 0
     synced: bool = False
-    # Recent mid-price samples for executed/cancelled classification:
-    # list of (ts_ms, mid_price). We only keep the last ~60 seconds.
+    # Recent mid-price samples for executed/cancelled classification AND for
+    # the dashboard sparkline: list of (ts_ms, mid_price). Retention bounded
+    # by ``MID_HISTORY_RETENTION_MS``.
     mid_history: list[tuple[int, float]] = field(default_factory=list)
     # Optional callback fired for every level change in apply_diff. Used by
     # the iceberg detector. Set to None for stand-alone use (default).
     on_level_change: LevelChangeCallback | None = None
+
+    # How long to keep mid samples. Long enough for both crossed-detection
+    # (60s) and the dashboard sparkline (~5min).
+    MID_HISTORY_RETENTION_MS: ClassVar[int] = 300_000
 
     # ------------------------------------------------------------------ helpers
     def best_bid(self) -> float | None:
@@ -116,7 +122,7 @@ class OrderBook:
         if m is None:
             return
         self.mid_history.append((ts_ms, m))
-        cutoff = ts_ms - 60_000
+        cutoff = ts_ms - self.MID_HISTORY_RETENTION_MS
         while self.mid_history and self.mid_history[0][0] < cutoff:
             self.mid_history.pop(0)
 

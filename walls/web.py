@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import log
-from .iceberg import IcebergEvent
+from .iceberg import IcebergDetector, IcebergEvent
 from .orderbook import OrderBook
 from .settings import WebCfg
 from .state import StateEvent, TrackedWall, WallState
@@ -37,6 +37,8 @@ class WebState:
         self.modes: dict[str, str] = {}
         # fingerprint -> TrackedWall (live reference)
         self.tracked_walls: dict[str, TrackedWall] = {}
+        # Optional live reference to the iceberg detector for stats display.
+        self.iceberg: IcebergDetector | None = None
         self.recent_events: deque[dict[str, Any]] = deque(maxlen=200)
         self.recent_icebergs: deque[dict[str, Any]] = deque(maxlen=100)
         self.started_at_ms: int = 0
@@ -67,6 +69,31 @@ class WebState:
             }
         )
 
+    def _spark(self, history: list[tuple[int, float]], max_points: int = 60) -> list[float]:
+        """Downsample a (ts_ms, mid) series to ``max_points`` y-values.
+
+        The dashboard renders an SVG polyline against the min/max of the
+        returned slice — it doesn't need the timestamps, just the values.
+        """
+        if not history:
+            return []
+        if len(history) <= max_points:
+            return [m for _, m in history]
+        # Bucket-average downsample: keeps shape, less spiky than every-Nth.
+        n = len(history)
+        step = n / float(max_points)
+        out: list[float] = []
+        for i in range(max_points):
+            lo = int(i * step)
+            hi = int((i + 1) * step)
+            if hi <= lo:
+                hi = lo + 1
+            chunk = history[lo:hi]
+            if not chunk:
+                continue
+            out.append(sum(m for _, m in chunk) / len(chunk))
+        return out
+
     def snapshot(self) -> dict[str, Any]:
         out: list[dict[str, Any]] = []
         n = self.cfg.levels_per_side
@@ -91,6 +118,7 @@ class WebState:
                 for w in self.tracked_walls.values()
                 if w.symbol == sym
             ]
+            spark = self._spark(book.mid_history)
             out.append(
                 {
                     "symbol": sym,
@@ -101,14 +129,27 @@ class WebState:
                     "bids": [{"price": p, "qty": q, "usd": p * q} for p, q in top_bids],
                     "asks": [{"price": p, "qty": q, "usd": p * q} for p, q in top_asks],
                     "walls": walls_here,
+                    "sparkline": spark,
                 }
             )
+        iceberg_stats: dict[str, Any] = {}
+        if self.iceberg is not None:
+            iceberg_stats = {
+                "confirmed": self.iceberg.confirmed_count,
+                "rejected_spoof": self.iceberg.rejected_spoof_count,
+                "anti_spoof": self.iceberg.cfg.require_trade_confirmation,
+            }
+        modes_index: dict[str, list[str]] = {}
+        for sym, mode in self.modes.items():
+            modes_index.setdefault(mode, []).append(sym)
         return {
             "started_at_ms": self.started_at_ms,
             "refresh_ms": self.cfg.refresh_ms,
             "symbols": out,
             "events": list(self.recent_events)[:50],
             "icebergs": list(self.recent_icebergs)[:30],
+            "iceberg_stats": iceberg_stats,
+            "modes": sorted(modes_index.keys()),
         }
 
 
