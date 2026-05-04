@@ -1,4 +1,4 @@
-"""Tests for top-N universe selection (mocked REST)."""
+"""Tests for mode-based universe selection (mocked REST)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from walls.universe import select_top_n
+from walls.settings import ModeCfg
+from walls.universe import select_for_modes
 
 
 class _MockRest:
@@ -25,44 +26,152 @@ class _MockRest:
         return self._tickers
 
 
-@pytest.mark.asyncio
-async def test_select_top_n_filters_by_quote_and_status() -> None:
-    info = {
+def _info(*pairs: tuple[str, str, bool]) -> dict[str, Any]:
+    return {
         "symbols": [
-            {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "ETHUSDT", "baseAsset": "ETH", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "ETHBTC", "baseAsset": "ETH", "quoteAsset": "BTC",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-            {"symbol": "DEADUSDT", "baseAsset": "DEAD", "quoteAsset": "USDT",
-             "status": "BREAK", "isSpotTradingAllowed": True},
-            {"symbol": "MARGINUSDT", "baseAsset": "MARG", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": False},
+            {
+                "symbol": sym,
+                "baseAsset": sym.replace(quote, "") if sym.endswith(quote) else sym[:-3],
+                "quoteAsset": quote,
+                "status": "TRADING" if active else "BREAK",
+                "isSpotTradingAllowed": True,
+            }
+            for sym, quote, active in pairs
         ],
     }
-    tickers = [
-        {"symbol": "BTCUSDT", "quoteVolume": "1000000000", "lastPrice": "50000"},
-        {"symbol": "ETHUSDT", "quoteVolume":  "500000000", "lastPrice":  "3000"},
-        {"symbol": "ETHBTC",  "quoteVolume":     "100000", "lastPrice":   "0.06"},
-        {"symbol": "DEADUSDT", "quoteVolume": "10000", "lastPrice": "1"},
-    ]
-    rest = _MockRest(info, tickers)
-    rows = await select_top_n(rest, top_n=10, quote_assets=("USDT",))
-    syms = [r.symbol for r in rows]
-    assert syms == ["BTCUSDT", "ETHUSDT"]  # only USDT, only TRADING+spot, sorted by volume
+
+
+def _btc() -> ModeCfg:
+    return ModeCfg(
+        name="btc", enabled=True, min_wall_usd=1_000_000,
+        symbols=("BTCUSDT",), top_n=0, exclude_bases=(),
+    )
+
+
+def _eth() -> ModeCfg:
+    return ModeCfg(
+        name="eth", enabled=True, min_wall_usd=500_000,
+        symbols=("ETHUSDT",), top_n=0, exclude_bases=(),
+    )
+
+
+def _alts(top_n: int = 5) -> ModeCfg:
+    return ModeCfg(
+        name="alts", enabled=True, min_wall_usd=150_000,
+        symbols=(), top_n=top_n, exclude_bases=("BTC", "ETH"),
+    )
 
 
 @pytest.mark.asyncio
-async def test_select_top_n_drops_invalid_rows() -> None:
-    info = {
-        "symbols": [
-            {"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT",
-             "status": "TRADING", "isSpotTradingAllowed": True},
-        ],
-    }
+async def test_btc_eth_modes_pick_only_their_symbols() -> None:
+    info = _info(
+        ("BTCUSDT", "USDT", True),
+        ("ETHUSDT", "USDT", True),
+        ("SOLUSDT", "USDT", True),
+    )
     tickers = [
-        {"symbol": "BTCUSDT", "quoteVolume": "0", "lastPrice": "0"},
+        {"symbol": "BTCUSDT", "quoteVolume": "1000000000", "lastPrice": "60000"},
+        {"symbol": "ETHUSDT", "quoteVolume": "500000000",  "lastPrice": "3000"},
+        {"symbol": "SOLUSDT", "quoteVolume": "100000000",  "lastPrice": "150"},
     ]
-    rows = await select_top_n(_MockRest(info, tickers), top_n=10, quote_assets=("USDT",))
-    assert rows == []
+    btc_only = ModeCfg(
+        name="btc", enabled=True, min_wall_usd=1_000_000,
+        symbols=("BTCUSDT",), top_n=0, exclude_bases=(),
+    )
+    rows = await select_for_modes(
+        _MockRest(info, tickers),
+        modes=(btc_only,),
+        quote_assets=("USDT",),
+    )
+    assert [r[0].symbol for r in rows] == ["BTCUSDT"]
+    assert all(r[1].name == "btc" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_alts_mode_excludes_btc_eth_and_sorts_by_volume() -> None:
+    info = _info(
+        ("BTCUSDT", "USDT", True),
+        ("ETHUSDT", "USDT", True),
+        ("SOLUSDT", "USDT", True),
+        ("XRPUSDT", "USDT", True),
+        ("DOGEUSDT", "USDT", True),
+    )
+    tickers = [
+        {"symbol": "BTCUSDT",  "quoteVolume": "1000000000", "lastPrice": "60000"},
+        {"symbol": "ETHUSDT",  "quoteVolume": "500000000",  "lastPrice": "3000"},
+        {"symbol": "SOLUSDT",  "quoteVolume": "200000000",  "lastPrice": "150"},
+        {"symbol": "XRPUSDT",  "quoteVolume": "300000000",  "lastPrice": "0.5"},
+        {"symbol": "DOGEUSDT", "quoteVolume": "50000000",   "lastPrice": "0.1"},
+    ]
+    rows = await select_for_modes(
+        _MockRest(info, tickers),
+        modes=(_alts(top_n=10),),
+        quote_assets=("USDT",),
+    )
+    syms = [r[0].symbol for r in rows]
+    # BTCUSDT and ETHUSDT excluded; remaining sorted by volume desc
+    assert syms == ["XRPUSDT", "SOLUSDT", "DOGEUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_three_modes_combined_no_duplicates() -> None:
+    info = _info(
+        ("BTCUSDT", "USDT", True),
+        ("ETHUSDT", "USDT", True),
+        ("SOLUSDT", "USDT", True),
+        ("XRPUSDT", "USDT", True),
+    )
+    tickers = [
+        {"symbol": "BTCUSDT", "quoteVolume": "1000000000", "lastPrice": "60000"},
+        {"symbol": "ETHUSDT", "quoteVolume": "500000000",  "lastPrice": "3000"},
+        {"symbol": "SOLUSDT", "quoteVolume": "200000000",  "lastPrice": "150"},
+        {"symbol": "XRPUSDT", "quoteVolume": "300000000",  "lastPrice": "0.5"},
+    ]
+    rows = await select_for_modes(
+        _MockRest(info, tickers),
+        modes=(_btc(), _eth(), _alts(top_n=10)),
+        quote_assets=("USDT",),
+    )
+    syms = [r[0].symbol for r in rows]
+    modes = [r[1].name for r in rows]
+    assert syms == ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT"]
+    assert modes == ["btc", "eth", "alts", "alts"]
+
+
+@pytest.mark.asyncio
+async def test_top_n_caps_alts_count() -> None:
+    info = _info(
+        ("XRPUSDT",  "USDT", True),
+        ("SOLUSDT",  "USDT", True),
+        ("DOGEUSDT", "USDT", True),
+    )
+    tickers = [
+        {"symbol": "XRPUSDT",  "quoteVolume": "300000000", "lastPrice": "0.5"},
+        {"symbol": "SOLUSDT",  "quoteVolume": "200000000", "lastPrice": "150"},
+        {"symbol": "DOGEUSDT", "quoteVolume": "100000000", "lastPrice": "0.1"},
+    ]
+    rows = await select_for_modes(
+        _MockRest(info, tickers),
+        modes=(_alts(top_n=2),),
+        quote_assets=("USDT",),
+    )
+    assert [r[0].symbol for r in rows] == ["XRPUSDT", "SOLUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_modes_contribute_nothing() -> None:
+    info = _info(("BTCUSDT", "USDT", True), ("ETHUSDT", "USDT", True))
+    tickers = [
+        {"symbol": "BTCUSDT", "quoteVolume": "1000000000", "lastPrice": "60000"},
+        {"symbol": "ETHUSDT", "quoteVolume": "500000000",  "lastPrice": "3000"},
+    ]
+    btc_off = ModeCfg(
+        name="btc", enabled=False, min_wall_usd=1_000_000,
+        symbols=("BTCUSDT",), top_n=0, exclude_bases=(),
+    )
+    rows = await select_for_modes(
+        _MockRest(info, tickers),
+        modes=(btc_off, _eth()),
+        quote_assets=("USDT",),
+    )
+    assert [r[0].symbol for r in rows] == ["ETHUSDT"]

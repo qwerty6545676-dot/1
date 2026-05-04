@@ -21,6 +21,7 @@ data/
 settings.yaml
 .env
 .env.*
+!.env.example
 
 # IDE
 .vscode/
