@@ -44,6 +44,21 @@ def test_min_qty_threshold() -> None:
     assert not buf.has_fill("BTCUSDT", "bid", 80_000.0, 1_000, 200, min_qty=1.0)
 
 
+def test_min_qty_threshold_inclusive_at_boundary() -> None:
+    """A trade whose qty exactly equals the threshold must count as a fill."""
+    buf = TradeBuffer(retention_ms=10_000)
+    buf.record("BTCUSDT", 80_000.0, 0.30, 1_000, buyer_is_maker=True)
+    # Boundary case: total == min_qty.
+    assert buf.has_fill("BTCUSDT", "bid", 80_000.0, 1_000, 200, min_qty=0.30)
+
+
+def test_empty_buffer_returns_false_regardless_of_min_qty() -> None:
+    """No trades in the window → False even when min_qty is 0."""
+    buf = TradeBuffer(retention_ms=10_000)
+    assert not buf.has_fill("BTCUSDT", "bid", 80_000.0, 1_000, 200, min_qty=0.0)
+    assert not buf.has_fill("BTCUSDT", "bid", 80_000.0, 1_000, 200, min_qty=1.0)
+
+
 def test_old_records_are_evicted_on_record() -> None:
     """retention_ms is enforced on every record() call to bound memory."""
     buf = TradeBuffer(retention_ms=1_000)

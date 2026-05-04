@@ -223,7 +223,9 @@ function renderSparkline(values) {
     const y = h - ((v - lo) / range) * (h - 4) - 2;
     return `${(i * dx).toFixed(2)},${y.toFixed(2)}`;
   }).join(" ");
-  const cls = values[values.length - 1] >= values[0] ? "up" : "down";
+  const delta = values[values.length - 1] - values[0];
+  // Three-state colour: green up, red down, blue (default) for flat / no change.
+  const cls = delta > 0 ? "up" : delta < 0 ? "down" : "";
   // Area path: line points + bottom-right + bottom-left corners
   const area = `M0,${h} L${pts.split(" ").join(" L ")} L${w},${h} Z`;
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
@@ -270,8 +272,8 @@ function renderLadder(symData) {
   if (spark.length >= 2) {
     const first = spark[0], last = spark[spark.length - 1];
     const pct = ((last - first) / first) * 100;
-    const sign = pct >= 0 ? "+" : "";
-    const cls = pct >= 0 ? "up" : "down";
+    const sign = pct > 0 ? "+" : "";
+    const cls = pct > 0 ? "up" : pct < 0 ? "down" : "";
     deltaHtml = `<span class="delta ${cls}">${sign}${pct.toFixed(2)}%</span>`;
   }
 

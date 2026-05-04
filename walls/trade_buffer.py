@@ -103,8 +103,14 @@ class TradeBuffer:
         window_ms: int,
         min_qty: float = 0.0,
     ) -> bool:
-        """``True`` iff at least ``min_qty`` was traded at the level in the window."""
-        return self.total_qty_in_window(symbol, side, price, center_ts_ms, window_ms) > min_qty
+        """``True`` iff some trade landed in the window and its total qty
+        is at least ``min_qty``.
+
+        The empty-buffer / no-trade case always returns False, regardless of
+        ``min_qty`` (an absence of trades cannot satisfy any threshold).
+        """
+        total = self.total_qty_in_window(symbol, side, price, center_ts_ms, window_ms)
+        return total > 0.0 and total >= min_qty
 
     # ---------------------------------------------------------------------- gc
     def gc(self, now_ms: int) -> None:
