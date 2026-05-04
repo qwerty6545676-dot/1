@@ -10,7 +10,11 @@ keeps the dependency surface minimal.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+# Signature: (side, price, old_qty, new_qty, ts_ms) -> None
+LevelChangeCallback = Callable[[str, float, float, float, int], None]
 
 
 @dataclass
@@ -24,6 +28,9 @@ class OrderBook:
     # Recent mid-price samples for executed/cancelled classification:
     # list of (ts_ms, mid_price). We only keep the last ~60 seconds.
     mid_history: list[tuple[int, float]] = field(default_factory=list)
+    # Optional callback fired for every level change in apply_diff. Used by
+    # the iceberg detector. Set to None for stand-alone use (default).
+    on_level_change: LevelChangeCallback | None = None
 
     # ------------------------------------------------------------------ helpers
     def best_bid(self) -> float | None:
@@ -76,23 +83,32 @@ class OrderBook:
         if self.last_update_id != 0 and first_u > self.last_update_id + 1:
             return False
 
+        ts_ms = int(evt.get("E", 0)) or self.last_event_ts_ms
+        cb = self.on_level_change
+
         for price_s, qty_s in evt.get("b", []):
             price = float(price_s)
             qty = float(qty_s)
+            old_qty = self.bids.get(price, 0.0)
             if qty == 0.0:
                 self.bids.pop(price, None)
             else:
                 self.bids[price] = qty
+            if cb is not None and ts_ms > 0:
+                cb("bid", price, old_qty, qty, ts_ms)
         for price_s, qty_s in evt.get("a", []):
             price = float(price_s)
             qty = float(qty_s)
+            old_qty = self.asks.get(price, 0.0)
             if qty == 0.0:
                 self.asks.pop(price, None)
             else:
                 self.asks[price] = qty
+            if cb is not None and ts_ms > 0:
+                cb("ask", price, old_qty, qty, ts_ms)
 
         self.last_update_id = last_u
-        self.last_event_ts_ms = int(evt.get("E", 0)) or self.last_event_ts_ms
+        self.last_event_ts_ms = ts_ms
         return True
 
     def record_mid(self, ts_ms: int) -> None:
