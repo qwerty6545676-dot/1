@@ -1,0 +1,59 @@
+[project]
+name = "binance-wall-scanner"
+version = "0.1.0"
+description = "Binance spot order-book wall detector with anti-spam state machine and Telegram alerts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "qwerty6545676" }]
+
+dependencies = [
+    "aiohttp>=3.9.0",
+    "websockets>=12.0",
+    "msgspec>=0.18.0",
+    "uvloop>=0.19.0; sys_platform != 'win32'",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+wall-scanner = "walls.main:cli"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["walls*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "RUF"]
+# RUF002/RUF003: ambiguous Unicode characters in comments/docstrings — we keep
+#   mathematical signs like ×, – for readability.
+# UP041: asyncio.TimeoutError is still valid and clearer in this codebase.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "UP041"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers mirror Binance API field names (U, E) verbatim.
+"tests/test_orderbook.py" = ["N803"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true

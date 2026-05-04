@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+binance_wall_scanner.egg-info/
+build/
+dist/
+
+# Project
+data/
+*.jsonl
+settings.yaml
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
