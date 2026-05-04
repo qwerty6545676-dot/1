@@ -10,11 +10,11 @@ from walls.state import StateEvent, TrackedWall, WallState
 def _cfg() -> TelegramCfg:
     return TelegramCfg(
         enabled=True,
-        token_env="UNUSED",
-        chat_id_env="UNUSED",
-        topic_low_env="UNUSED",
-        topic_mid_env="UNUSED",
-        topic_high_env="UNUSED",
+        bot_token=None,
+        chat_id=None,
+        topic_low=None,
+        topic_mid=None,
+        topic_high=None,
         tier_low_usd=150_000.0,
         tier_mid_usd=500_000.0,
         tier_high_usd=2_000_000.0,

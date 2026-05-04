@@ -24,9 +24,9 @@ from .detector import aggregate_zones, scan
 from .notifier import TelegramNotifier
 from .orderbook import FirstEventGate, OrderBook
 from .persistence import JsonlWriter
-from .settings import Settings, load
+from .settings import ModeCfg, Settings, load
 from .state import StateEvent, StateMachine, WallState
-from .universe import SymbolInfo, select_top_n
+from .universe import SymbolInfo, select_for_modes
 
 _log = log.get("main")
 
@@ -34,6 +34,7 @@ _log = log.get("main")
 @dataclass
 class _SymbolCtx:
     info: SymbolInfo
+    mode: ModeCfg
     book: OrderBook
     gate: FirstEventGate
     pending_evts: list[dict]
@@ -55,19 +56,36 @@ class Scanner:
         self._stop.set()
 
     # -------------------------------------------------------------- universe
-    async def _build_universe(self, rest: BinanceRest) -> list[SymbolInfo]:
-        rows = await select_top_n(
-            rest,
-            top_n=self.s.universe.top_n,
-            quote_assets=self.s.universe.quote_assets,
+    async def _build_universe(self, rest: BinanceRest) -> list[tuple[SymbolInfo, ModeCfg]]:
+        modes = self.s.enabled_modes()
+        if not modes:
+            raise RuntimeError(
+                "All trading modes are disabled — enable at least one of "
+                "MODE_BTC_ENABLED / MODE_ETH_ENABLED / MODE_ALTS_ENABLED."
+            )
+        rows = await select_for_modes(
+            rest, modes=modes, quote_assets=self.s.quote_assets,
         )
         if not rows:
             raise RuntimeError("Universe is empty — REST returned no usable tickers.")
-        _log.info("universe: %d symbols selected", len(rows))
-        for r in rows[:5]:
-            _log.info("  - %s vol=$%.0fM  last=%s", r.symbol, r.quote_volume_24h / 1e6, r.last_price)
-        if len(rows) > 5:
-            _log.info("  ... and %d more", len(rows) - 5)
+        # Log per-mode summary
+        by_mode: dict[str, list[SymbolInfo]] = {}
+        for info, m in rows:
+            by_mode.setdefault(m.name, []).append(info)
+        _log.info("universe: %d symbols across %d mode(s)", len(rows), len(by_mode))
+        for mode_name, infos in by_mode.items():
+            usd_cap = next(m.min_wall_usd for m in modes if m.name == mode_name)
+            _log.info(
+                "  mode=%s symbols=%d min_wall=$%.0fk",
+                mode_name, len(infos), usd_cap / 1000.0,
+            )
+            for r in infos[:3]:
+                _log.info(
+                    "    - %s vol=$%.0fM  last=%s",
+                    r.symbol, r.quote_volume_24h / 1e6, r.last_price,
+                )
+            if len(infos) > 3:
+                _log.info("    ... and %d more", len(infos) - 3)
         return rows
 
     # -------------------------------------------------------------- per-symbol
@@ -237,13 +255,14 @@ class Scanner:
             self.s.binance.rest_base, timeout_sec=self.s.binance.rest_request_timeout_sec
         ) as rest, TelegramNotifier(self.s.telegram) as notifier:
             universe = await self._build_universe(rest)
-            for info in universe:
+            for info, mode in universe:
                 ctx = _SymbolCtx(
                     info=info,
+                    mode=mode,
                     book=OrderBook(symbol=info.symbol),
                     gate=FirstEventGate(),
                     pending_evts=[],
-                    min_wall_usd=self.s.detector.min_wall_usd_for(info.volume_24h_usd),
+                    min_wall_usd=mode.min_wall_usd,
                 )
                 self.symbols[info.symbol] = ctx
 
@@ -274,10 +293,11 @@ def _install_signal_handlers(scanner: Scanner) -> None:
             pass
 
 
-async def _amain(settings_path: str) -> None:
-    settings = load(settings_path)
+async def _amain(env_path: str | None) -> None:
+    settings = load(env_path)
     log.configure(settings.log_level)
-    _log.info("starting wall-scanner — settings: %s", settings_path)
+    enabled = [m.name for m in settings.enabled_modes()]
+    _log.info("starting wall-scanner — env=%s  modes=%s", env_path or "<none>", enabled)
     scanner = Scanner(settings)
     _install_signal_handlers(scanner)
     await scanner.run()
@@ -286,13 +306,15 @@ async def _amain(settings_path: str) -> None:
 def cli() -> None:
     parser = argparse.ArgumentParser(prog="wall-scanner")
     parser.add_argument(
-        "--settings",
-        default=os.environ.get("WALL_SCANNER_SETTINGS", "settings.yaml"),
-        help="Path to YAML settings file (default: ./settings.yaml)",
+        "--env",
+        default=os.environ.get("WALL_SCANNER_ENV", ".env"),
+        help="Path to .env file (default: ./.env). Pass empty string to skip "
+             "and rely purely on existing environment variables.",
     )
     args = parser.parse_args()
+    env_path: str | None = args.env if args.env else None
     try:
-        asyncio.run(_amain(args.settings))
+        asyncio.run(_amain(env_path))
     except KeyboardInterrupt:
         sys.exit(0)
 

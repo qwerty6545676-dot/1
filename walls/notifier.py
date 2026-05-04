@@ -91,12 +91,12 @@ class _Tier:
 class TelegramNotifier:
     def __init__(self, cfg: TelegramCfg) -> None:
         self.cfg = cfg
-        self._token = cfg.token()
-        self._chat_id = cfg.chat_id()
+        self._token = cfg.bot_token
+        self._chat_id = cfg.chat_id
         self._tiers = [
-            _Tier(cfg.topic_for(cfg.topic_high_env), cfg.tier_high_usd, "high"),
-            _Tier(cfg.topic_for(cfg.topic_mid_env), cfg.tier_mid_usd, "mid"),
-            _Tier(cfg.topic_for(cfg.topic_low_env), cfg.tier_low_usd, "low"),
+            _Tier(cfg.topic_high, cfg.tier_high_usd, "high"),
+            _Tier(cfg.topic_mid, cfg.tier_mid_usd, "mid"),
+            _Tier(cfg.topic_low, cfg.tier_low_usd, "low"),
         ]
         self._session: aiohttp.ClientSession | None = None
 

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from walls.detector import aggregate_zones, scan
 from walls.orderbook import OrderBook
-from walls.settings import DetectorCfg, SizeTier
+from walls.settings import DetectorCfg
 
 
 def _cfg(**overrides) -> DetectorCfg:
     base = dict(
-        size_tiers=(SizeTier(min_24h_volume_usd=0.0, min_wall_usd=10_000.0),),
         max_distance_pct=3.0,
         min_distance_pct=0.05,
         min_lifetime_sec=60.0,

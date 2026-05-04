@@ -51,8 +51,22 @@ The scanner targets `data-api.binance.vision` (REST) and
 read-only **market-data CDN**. Those hosts work in many regions where the
 main `api.binance.com` / `stream.binance.com` are geo-blocked, because
 they expose only public market data (no trading). If you do have direct
-access to the main API, just change `binance.rest_base` and `binance.ws_base`
-in `settings.yaml`.
+access to the main API, override `BINANCE_REST_BASE` and `BINANCE_WS_BASE`
+in your `.env`.
+
+## Three trading modes
+
+The scanner watches three independent universes that you can toggle
+on / off:
+
+| Mode | What it watches | Default USD threshold |
+|---|---|---|
+| **BTC**  | `BTCUSDT` only           | $1,000,000 |
+| **ETH**  | `ETHUSDT` only           | $500,000  |
+| **Alts** | Top-48 alt pairs by 24 h volume (excl. BTC, ETH) | $150,000  |
+
+Disable any combination via `MODE_BTC_ENABLED=false`,
+`MODE_ETH_ENABLED=false`, `MODE_ALTS_ENABLED=false` in your `.env`.
 
 ## Quick start
 
@@ -62,39 +76,43 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # 2. configure
-cp settings.example.yaml settings.yaml
-# (edit thresholds if you want)
+cp .env.example .env
+# Edit .env: set TG_BOT_TOKEN, TG_CHAT_ID, tweak filters/modes if you want.
 
-# 3. set Telegram env vars (optional — without them the scanner runs in
-#    log-only mode and writes events to data/walls.jsonl)
-export TG_BOT_TOKEN="123:abc..."
-export TG_CHAT_ID="-100123..."   # group/channel id
-# optional forum-topic ids (otherwise everything goes to the default topic)
-export TG_TOPIC_LOW="…"
-export TG_TOPIC_MID="…"
-export TG_TOPIC_HIGH="…"
-
-# 4. run
-wall-scanner --settings settings.yaml
+# 3. run
+wall-scanner
 # or:
-python -m walls.main --settings settings.yaml
+python -m walls.main
 ```
 
 Press `Ctrl+C` to stop cleanly.
 
-## Configuration cheat-sheet
+See [GUIDE.md](GUIDE.md) for the full Russian-language guide covering setup,
+each filter explained, alert reading, and tuning recipes.
 
-| Setting | Default | What it does |
+## Configuration cheat-sheet (`.env`)
+
+Filters that apply to every enabled mode:
+
+| Variable | Default | What it does |
 |---|---|---|
-| `universe.top_n` | 50 | How many spot pairs to watch (sorted by 24 h USD volume). |
-| `universe.quote_assets` | `[USDT]` | Quote-asset filter. |
-| `detector.size_tiers` | $1M / $500k / $150k | Minimum wall size in USD per volume tier. |
-| `detector.max_distance_pct` | 3.0 | Walls farther than this from mid-price are ignored. |
-| `detector.min_lifetime_sec` | 60 | How long a wall must sit before alerting (anti-spoof). |
-| `detector.relative_size_multiplier` | 3.0 | Wall must be ≥ N × the median size of nearby levels. |
-| `detector.zone_aggregation_pct` | 0.1 | Walls within this percentage are merged. |
-| `detector.cold_start_grace_sec` | 120 | Silent observation window after startup. |
-| `cooldown.fingerprint_ttl_sec` | 1800 | Same wall can't re-alert within this many seconds. |
+| `MODE_*_ENABLED` | `true` | Turn each of BTC / ETH / Alts modes on or off independently. |
+| `MODE_BTC_MIN_WALL_USD` | `1000000` | Minimum wall size for BTCUSDT. |
+| `MODE_ETH_MIN_WALL_USD` | `500000`  | Minimum wall size for ETHUSDT. |
+| `MODE_ALTS_MIN_WALL_USD` | `150000` | Minimum wall size for alt pairs. |
+| `MODE_ALTS_TOP_N` | `48` | How many alt pairs to follow (by 24 h USD volume). |
+| `MAX_DISTANCE_PCT` | `3.0` | Walls farther than this from mid-price are ignored. |
+| `MIN_DISTANCE_PCT` | `0.05` | Walls closer than this to mid-price are ignored. |
+| `MIN_LIFETIME_SEC` | `60` | How long a wall must sit before alerting (anti-spoof). |
+| `RELATIVE_SIZE_MULTIPLIER` | `3.0` | Wall must be ≥ N × the median of nearby levels. |
+| `NEIGHBOUR_LEVELS` | `20` | Window over which the median is computed. |
+| `ZONE_AGGREGATION_PCT` | `0.10` | Walls within this percentage are merged. |
+| `COLD_START_GRACE_SEC` | `120` | Silent observation window after startup. |
+| `EXECUTION_WINDOW_SEC` | `5` | Window for classifying executed vs cancelled. |
+| `COOLDOWN_TTL_SEC` | `1800` | Same wall can't re-alert within this many seconds. |
+| `TG_BOT_TOKEN` | — | Bot token from @BotFather. |
+| `TG_CHAT_ID` | — | Your numeric chat id (DM, group, or channel). |
+| `TG_TIER_LOW_USD` / `TG_TIER_MID_USD` / `TG_TIER_HIGH_USD` | `150k / 500k / 2M` | Tier thresholds for routing. |
 
 ## Output
 

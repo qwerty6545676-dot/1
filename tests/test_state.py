@@ -5,13 +5,12 @@ from __future__ import annotations
 from walls.cooldown import Cooldown
 from walls.detector import Candidate
 from walls.orderbook import OrderBook
-from walls.settings import DetectorCfg, SizeTier
+from walls.settings import DetectorCfg
 from walls.state import StateMachine, WallState
 
 
 def _cfg(min_lifetime_sec: float = 60.0, grace: float = 0.0) -> DetectorCfg:
     return DetectorCfg(
-        size_tiers=(SizeTier(0.0, 10_000.0),),
         max_distance_pct=3.0,
         min_distance_pct=0.05,
         min_lifetime_sec=min_lifetime_sec,
