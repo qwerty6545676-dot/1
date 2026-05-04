@@ -12,6 +12,7 @@ from typing import Any
 import aiohttp
 
 from . import log
+from .iceberg import IcebergEvent
 from .settings import TelegramCfg
 from .state import StateEvent, TrackedWall
 
@@ -81,6 +82,21 @@ def format_message(evt: StateEvent) -> str:
     return f"{emoji} {w.symbol} {side_word} {evt.kind} {_fmt_usd(w.usd_value)} @ {w.price}"
 
 
+def format_iceberg(evt: IcebergEvent) -> str:
+    side_word = "BUY" if evt.side == "bid" else "SELL"
+    title = f"🧊 <b>{evt.symbol}</b> — iceberg ({side_word})"
+    line2 = (
+        f"Price: <code>{evt.price:g}</code>  "
+        f"visible {_fmt_qty(evt.visible_qty)} ({_fmt_usd(evt.visible_usd)})"
+    )
+    line3 = (
+        f"Refilled <b>{evt.regen_count}×</b>  "
+        f"flow ≈ <b>{_fmt_usd(evt.cumulative_usd)}</b> "
+        f"({_fmt_qty(evt.cumulative_qty)})"
+    )
+    return f"{title}\n{line2}\n{line3}"
+
+
 @dataclass
 class _Tier:
     topic_id: int | None
@@ -127,13 +143,34 @@ class TelegramNotifier:
                 return tier
         return None  # below low threshold — don't send
 
+    def _route_iceberg(self, evt: IcebergEvent) -> _Tier | None:
+        # Icebergs are routed by cumulative flow, with the same tier ladder as
+        # walls. Below the low threshold → don't send.
+        usd = evt.cumulative_usd
+        for tier in self._tiers:  # high → mid → low
+            if usd >= tier.threshold_usd:
+                return tier
+        return None
+
     async def send(self, evt: StateEvent) -> None:
         if not self.enabled or self._session is None:
             return
         tier = self._route(evt)
         if tier is None:
             return
-        text = format_message(evt)
+        await self._post(format_message(evt), tier)
+
+    async def send_iceberg(self, evt: IcebergEvent) -> None:
+        if not self.enabled or self._session is None:
+            return
+        tier = self._route_iceberg(evt)
+        if tier is None:
+            return
+        await self._post(format_iceberg(evt), tier)
+
+    async def _post(self, text: str, tier: _Tier) -> None:
+        if self._session is None:
+            return
         payload: dict[str, Any] = {
             "chat_id": self._chat_id,
             "text": text,
@@ -142,7 +179,6 @@ class TelegramNotifier:
         }
         if tier.topic_id is not None:
             payload["message_thread_id"] = tier.topic_id
-
         url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         try:
             async with self._session.post(url, json=payload) as resp:

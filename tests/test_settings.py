@@ -18,6 +18,8 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
             k.startswith("MODE_")
             or k.startswith("TG_")
             or k.startswith("BINANCE_")
+            or k.startswith("ICEBERG_")
+            or k.startswith("WEB_")
             or k
             in {
                 "QUOTE_ASSETS",
@@ -120,3 +122,41 @@ def test_telegram_optional_topics(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.telegram.topic_low is None
     assert s.telegram.topic_mid is None
     assert s.telegram.topic_high is None
+
+
+def test_iceberg_defaults() -> None:
+    """Iceberg detector enabled by default with sensible defaults."""
+    s = load(env_file=None)
+    ic = s.iceberg
+    assert ic.enabled is True
+    assert ic.min_visible_usd == 25_000.0
+    assert ic.eat_threshold_ratio == 0.30
+    assert ic.regen_window_sec == 10.0
+    assert ic.min_regens == 4
+    assert ic.cooldown_ttl_sec == 1800.0
+
+
+def test_iceberg_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ICEBERG_ENABLED", "false")
+    monkeypatch.setenv("ICEBERG_MIN_REGENS", "8")
+    s = load(env_file=None)
+    assert s.iceberg.enabled is False
+    assert s.iceberg.min_regens == 8
+
+
+def test_web_defaults_disabled() -> None:
+    """Web dashboard is opt-in: WEB_ENABLED defaults to false."""
+    s = load(env_file=None)
+    assert s.web.enabled is False
+    assert s.web.host == "127.0.0.1"
+    assert s.web.port == 8000
+
+
+def test_web_can_be_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEB_ENABLED", "true")
+    monkeypatch.setenv("WEB_PORT", "9090")
+    monkeypatch.setenv("WEB_LEVELS_PER_SIDE", "10")
+    s = load(env_file=None)
+    assert s.web.enabled is True
+    assert s.web.port == 9090
+    assert s.web.levels_per_side == 10

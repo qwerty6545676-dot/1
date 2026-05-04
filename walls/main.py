@@ -21,6 +21,7 @@ from .binance_rest import BinanceRest, BinanceRestError
 from .binance_ws import run_with_reconnect
 from .cooldown import Cooldown
 from .detector import aggregate_zones, scan
+from .iceberg import IcebergDetector, IcebergEvent
 from .notifier import TelegramNotifier
 from .orderbook import FirstEventGate, OrderBook
 from .persistence import JsonlWriter
@@ -48,8 +49,19 @@ class Scanner:
         self.state = StateMachine(cfg=settings.detector, started_at_ms=self.started_at_ms)
         self.cooldown = Cooldown(ttl_sec=settings.cooldown.fingerprint_ttl_sec)
         self.writer = JsonlWriter(settings.persistence.walls_log_path)
+        self.iceberg = IcebergDetector(settings.iceberg)
         self.symbols: dict[str, _SymbolCtx] = {}
+        # Pending iceberg events drained by the detect loop; populated by the
+        # WS-driven on_level_change callback (sync) and read back asynchronously.
+        self._iceberg_queue: list[IcebergEvent] = []
         self._stop = asyncio.Event()
+        # Optional web dashboard state — only populated if WEB_ENABLED.
+        self.web_state = None
+        if settings.web.enabled:
+            from .web import WebState  # local import: optional dep
+            self.web_state = WebState(settings.web)
+            self.web_state.started_at_ms = self.started_at_ms
+            self.web_state.tracked_walls = self.state.tracked
 
     # --------------------------------------------------------------- lifecycle
     def request_stop(self) -> None:
@@ -218,9 +230,29 @@ class Scanner:
                     evt.wall.usd_value / 1000.0,
                     evt.wall.distance_pct,
                 )
+                if self.web_state is not None:
+                    self.web_state.record_wall_event(evt, now_ms)
                 await notifier.send(evt)
 
+            # Drain any iceberg events accumulated by the on_level_change cb.
+            if self._iceberg_queue:
+                pending_ic = self._iceberg_queue[:]
+                self._iceberg_queue.clear()
+                for ic in pending_ic:
+                    self._persist_iceberg(ic, now_ms)
+                    _log.info(
+                        "ICEBERG %s %s @ %g  visible=%.0fk  flow=%.0fk  regens=%d",
+                        ic.symbol, ic.side, ic.price,
+                        ic.visible_usd / 1000.0,
+                        ic.cumulative_usd / 1000.0,
+                        ic.regen_count,
+                    )
+                    if self.web_state is not None:
+                        self.web_state.record_iceberg(ic, now_ms)
+                    await notifier.send_iceberg(ic)
+
             self.cooldown.gc(now_ms)
+            self.iceberg.gc(now_ms)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=interval)
             except TimeoutError:
@@ -248,6 +280,27 @@ class Scanner:
         except OSError as e:
             _log.warning("walls.jsonl write failed: %s", e)
 
+    def _persist_iceberg(self, evt: IcebergEvent, now_ms: int) -> None:
+        rec = {
+            "ts_ms": now_ms,
+            "kind": "iceberg",
+            "fingerprint": evt.fingerprint,
+            "symbol": evt.symbol,
+            "side": evt.side,
+            "price": evt.price,
+            "visible_qty": evt.visible_qty,
+            "visible_usd": evt.visible_usd,
+            "cumulative_qty": evt.cumulative_qty,
+            "cumulative_usd": evt.cumulative_usd,
+            "regen_count": evt.regen_count,
+            "first_seen_ms": evt.first_seen_ts_ms,
+            "last_seen_ms": evt.last_seen_ts_ms,
+        }
+        try:
+            self.writer.write(rec)
+        except OSError as e:
+            _log.warning("walls.jsonl write failed: %s", e)
+
     # ------------------------------------------------------------------- run
     async def run(self) -> None:
         log.configure(self.s.log_level)
@@ -256,15 +309,42 @@ class Scanner:
         ) as rest, TelegramNotifier(self.s.telegram) as notifier:
             universe = await self._build_universe(rest)
             for info, mode in universe:
+                book = OrderBook(symbol=info.symbol)
+                # Wire the iceberg detector to this book's level changes.
+                if self.s.iceberg.enabled:
+                    sym = info.symbol
+
+                    def _make_cb(b: OrderBook, s: str) -> object:
+                        def _on_change(
+                            side: str, price: float,
+                            old_qty: float, new_qty: float, ts_ms: int,
+                        ) -> None:
+                            mid = b.mid()
+                            ev = self.iceberg.observe_change(
+                                s, side, price, old_qty, new_qty, ts_ms, mid,
+                            )
+                            if ev is not None:
+                                self._iceberg_queue.append(ev)
+                        return _on_change
+
+                    book.on_level_change = _make_cb(book, sym)  # type: ignore[assignment]
                 ctx = _SymbolCtx(
                     info=info,
                     mode=mode,
-                    book=OrderBook(symbol=info.symbol),
+                    book=book,
                     gate=FirstEventGate(),
                     pending_evts=[],
                     min_wall_usd=mode.min_wall_usd,
                 )
                 self.symbols[info.symbol] = ctx
+
+            # Populate the optional web state with live references.
+            if self.web_state is not None:
+                self.web_state.symbols = [info.symbol for info, _ in universe]
+                self.web_state.books = {
+                    sym: ctx.book for sym, ctx in self.symbols.items()
+                }
+                self.web_state.modes = {info.symbol: mode.name for info, mode in universe}
 
             tasks = [
                 asyncio.create_task(self._ws_for_symbol(ctx, rest), name=f"sym-{sym}")
@@ -272,7 +352,34 @@ class Scanner:
             ]
             tasks.append(asyncio.create_task(self._detect_loop(notifier), name="detect"))
 
+            web_server = None
+            if self.web_state is not None:
+                from .web import make_app  # type: ignore[import-not-found]
+                try:
+                    import uvicorn
+                except ImportError as e:
+                    raise RuntimeError(
+                        "WEB_ENABLED=true but FastAPI/uvicorn are not installed. "
+                        "Install with: pip install -e .[web]"
+                    ) from e
+                app = make_app(self.web_state)
+                config = uvicorn.Config(
+                    app,
+                    host=self.s.web.host,
+                    port=self.s.web.port,
+                    log_level="warning",
+                    access_log=False,
+                )
+                web_server = uvicorn.Server(config)
+                _log.info(
+                    "starting web dashboard on http://%s:%d/",
+                    self.s.web.host, self.s.web.port,
+                )
+                tasks.append(asyncio.create_task(web_server.serve(), name="web"))
+
             await self._stop.wait()
+            if web_server is not None:
+                web_server.should_exit = True
             for t in tasks:
                 t.cancel()
             for t in tasks:

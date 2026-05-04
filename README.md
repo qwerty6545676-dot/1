@@ -1,8 +1,10 @@
 # Binance Spot Wall Scanner
 
 Real-time detector for **large limit orders that hold price** on Binance spot —
-the "walls" that act as visible support or resistance. Sends Telegram alerts
-on three high-signal events:
+the "walls" that act as visible support or resistance, plus **iceberg-order
+detection** for whales that hide their footprint, plus an optional **live
+heatmap dashboard** in the browser. Sends Telegram alerts on four
+high-signal events:
 
 - **🟩 / 🟥 Wall appeared** — a new big bid/ask order has been sitting in the
   book for at least *60 seconds* (default), close to the mid-price.
@@ -10,6 +12,9 @@ on three high-signal events:
   Often a leading signal that the level no longer holds.
 - **💥 Wall executed** — an active wall was hit by aggressive flow and the
   price crossed it. Confirmed break of support/resistance.
+- **🧊 Iceberg detected** — same price level keeps refilling after each fill
+  with a similar visible quantity. Signals a large hidden order being worked
+  through the book ([details below](#iceberg-detection)).
 
 ## Why this is not yet another spam bot
 
@@ -68,6 +73,57 @@ on / off:
 Disable any combination via `MODE_BTC_ENABLED=false`,
 `MODE_ETH_ENABLED=false`, `MODE_ALTS_ENABLED=false` in your `.env`.
 
+## Iceberg detection
+
+A regular wall may be just a single big limit order. A **whale** typically
+doesn't show a $50M order all at once — they use **iceberg orders**: a small
+visible chunk that gets *replaced with the same size* every time it's eaten.
+From the order-book viewer's side, the level keeps disappearing and
+reappearing at the same price.
+
+The scanner watches every level update (not just snapshots) and counts
+those eat→regen cycles. When the same level refills `≥ ICEBERG_MIN_REGENS`
+times in `ICEBERG_LOOKBACK_SEC` (defaults: 4 cycles in 10 minutes), it
+emits a `🧊 iceberg` alert with the cumulative flow that's gone through
+the level — a lower bound on the whale's hidden size.
+
+Tunable knobs in `.env`:
+
+```env
+ICEBERG_ENABLED=true
+ICEBERG_MIN_VISIBLE_USD=25000
+ICEBERG_MAX_DISTANCE_PCT=1.5
+ICEBERG_EAT_THRESHOLD_RATIO=0.30
+ICEBERG_REGEN_WINDOW_SEC=10
+ICEBERG_REGEN_MATCH_LO=0.7
+ICEBERG_REGEN_MATCH_HI=1.4
+ICEBERG_MIN_REGENS=4
+ICEBERG_LOOKBACK_SEC=600
+ICEBERG_COOLDOWN_TTL_SEC=1800
+```
+
+See [GUIDE.md §8](GUIDE.md#8-iceberg-detection--поиск-скрытых-китов)
+for the full algorithm.
+
+## Heatmap dashboard
+
+Optional FastAPI web UI showing live order books for all watched symbols,
+with active walls highlighted and a feed of recent wall + iceberg events.
+
+```bash
+pip install -e ".[web]"
+# add to .env:
+#   WEB_ENABLED=true
+#   WEB_HOST=127.0.0.1
+#   WEB_PORT=8000
+wall-scanner
+# open http://127.0.0.1:8000/
+```
+
+The dashboard is **localhost-only by default** and has no authentication —
+do not expose `WEB_HOST=0.0.0.0` to the internet without putting a reverse
+proxy with auth in front of it. See [GUIDE.md §9](GUIDE.md#9-heatmap-дашборд--live-картинка-стакана).
+
 ## Quick start
 
 ```bash
@@ -113,13 +169,21 @@ Filters that apply to every enabled mode:
 | `TG_BOT_TOKEN` | — | Bot token from @BotFather. |
 | `TG_CHAT_ID` | — | Your numeric chat id (DM, group, or channel). |
 | `TG_TIER_LOW_USD` / `TG_TIER_MID_USD` / `TG_TIER_HIGH_USD` | `150k / 500k / 2M` | Tier thresholds for routing. |
+| `ICEBERG_ENABLED` | `true` | Toggle iceberg detector. |
+| `ICEBERG_MIN_REGENS` | `4` | Refill cycles required for an iceberg alert. |
+| `ICEBERG_REGEN_WINDOW_SEC` | `10` | Time window after an eat for a refill to count. |
+| `WEB_ENABLED` | `false` | Run the optional heatmap dashboard. |
+| `WEB_PORT` | `8000` | Port for the dashboard. |
 
 ## Output
 
 - **Telegram** — formatted HTML messages, optionally routed to three forum
   topics (low / mid / high) by USD size.
-- **`data/walls.jsonl`** — every state-transition event, one JSON record per
-  line, for offline analysis or backtesting.
+- **`data/walls.jsonl`** — every state-transition event (incl. iceberg
+  detections), one JSON record per line, for offline analysis or backtesting.
+- **Heatmap dashboard** (optional, `WEB_ENABLED=true`) — `http://127.0.0.1:8000/`
+  with live bid/ask ladder per symbol, active-wall markers, recent events feed,
+  and a separate iceberg feed.
 
 ## Architecture
 
@@ -134,35 +198,36 @@ Filters that apply to every enabled mode:
    │ OrderBook (per symbol)                 │
    │   • snapshot + diff merge              │
    │   • continuity tracking                │
-   │   • mid-price history (for executed/   │
-   │     cancelled classification)          │
-   └────────────────┬───────────────────────┘
-                    │
-                    ▼
-        ┌────────────────────────┐
-        │ Detector               │
-        │   • USD size threshold │
-        │   • distance from mid  │
-        │   • relative size vs   │
-        │     median neighbours  │
-        │   • zone aggregation   │
-        └────────────┬───────────┘
-                     ▼
-        ┌────────────────────────┐
-        │ State Machine          │
-        │   PENDING → ACTIVE     │
-        │   ACTIVE  → EXECUTED   │
-        │   ACTIVE  → CANCELLED  │
-        └────────────┬───────────┘
-                     ▼
-   ┌─────────────┐  ┌─────────────┐
-   │  Cooldown   │→ │  Notifier   │→ Telegram
-   │ (30 min/fp) │  │ (tier route)│
-   └─────────────┘  └─────────────┘
-                     ▼
-                ┌─────────┐
-                │ JSONL   │
-                └─────────┘
+   │   • mid-price history                  │
+   │   • on_level_change callback ──────────┼───────────┐
+   └────────────────┬───────────────────────┘           │
+                    │                                   ▼
+                    ▼                       ┌──────────────────────┐
+        ┌────────────────────────┐          │ Iceberg Detector     │
+        │ Detector               │          │   • per-level state  │
+        │   • USD size threshold │          │   • eat / regen      │
+        │   • distance from mid  │          │     counter          │
+        │   • relative size vs   │          │   • lookback window  │
+        │     median neighbours  │          │   • cooldown         │
+        │   • zone aggregation   │          └──────────┬───────────┘
+        └────────────┬───────────┘                     │
+                     ▼                                 │
+        ┌────────────────────────┐                     │
+        │ State Machine          │                     │
+        │   PENDING → ACTIVE     │                     │
+        │   ACTIVE  → EXECUTED   │                     │
+        │   ACTIVE  → CANCELLED  │                     │
+        └────────────┬───────────┘                     │
+                     ▼                                 ▼
+   ┌─────────────┐  ┌─────────────────────────────────────┐
+   │  Cooldown   │→ │  Notifier  (Telegram, tier-routed)  │
+   │ (30 min/fp) │  └─────────────────────────────────────┘
+   └─────────────┘                  │
+                                    ▼
+                       ┌─────────┐  ┌──────────────────┐
+                       │ JSONL   │  │ Web heatmap      │
+                       │ log     │  │ (optional, FastAPI)│
+                       └─────────┘  └──────────────────┘
 ```
 
 ## Tests

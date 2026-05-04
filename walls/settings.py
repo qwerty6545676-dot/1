@@ -114,6 +114,40 @@ class CooldownCfg:
 
 
 @dataclass(frozen=True)
+class IcebergCfg:
+    """Iceberg / refill-order detector knobs.
+
+    A level is considered "eaten" when its qty drops to ``eat_threshold_ratio``
+    of its previous size. A regen is when, within ``regen_window_sec``, the
+    qty restores to between ``regen_match_lo`` and ``regen_match_hi`` of the
+    eaten qty. After ``min_regens`` regens within ``lookback_sec``, an
+    IcebergEvent is emitted (subject to ``cooldown_ttl_sec``).
+    """
+
+    enabled: bool
+    min_visible_usd: float
+    max_distance_pct: float
+    eat_threshold_ratio: float
+    regen_window_sec: float
+    regen_match_lo: float
+    regen_match_hi: float
+    min_regens: int
+    lookback_sec: float
+    cooldown_ttl_sec: float
+
+
+@dataclass(frozen=True)
+class WebCfg:
+    """Optional FastAPI heatmap dashboard."""
+
+    enabled: bool
+    host: str
+    port: int
+    refresh_ms: int
+    levels_per_side: int
+
+
+@dataclass(frozen=True)
 class TelegramCfg:
     enabled: bool
     bot_token: str | None
@@ -141,6 +175,8 @@ class Settings:
     detector: DetectorCfg
     orderbook: OrderbookCfg
     cooldown: CooldownCfg
+    iceberg: IcebergCfg
+    web: WebCfg
     telegram: TelegramCfg
     persistence: PersistenceCfg
     log_level: str
@@ -222,6 +258,27 @@ def load(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         fingerprint_ttl_sec=_env_float("COOLDOWN_TTL_SEC", 1800.0),
     )
 
+    iceberg = IcebergCfg(
+        enabled=_env_bool("ICEBERG_ENABLED", True),
+        min_visible_usd=_env_float("ICEBERG_MIN_VISIBLE_USD", 25_000.0),
+        max_distance_pct=_env_float("ICEBERG_MAX_DISTANCE_PCT", 1.5),
+        eat_threshold_ratio=_env_float("ICEBERG_EAT_THRESHOLD_RATIO", 0.30),
+        regen_window_sec=_env_float("ICEBERG_REGEN_WINDOW_SEC", 10.0),
+        regen_match_lo=_env_float("ICEBERG_REGEN_MATCH_LO", 0.7),
+        regen_match_hi=_env_float("ICEBERG_REGEN_MATCH_HI", 1.4),
+        min_regens=_env_int("ICEBERG_MIN_REGENS", 4),
+        lookback_sec=_env_float("ICEBERG_LOOKBACK_SEC", 600.0),
+        cooldown_ttl_sec=_env_float("ICEBERG_COOLDOWN_TTL_SEC", 1800.0),
+    )
+
+    web = WebCfg(
+        enabled=_env_bool("WEB_ENABLED", False),
+        host=_env_str("WEB_HOST", "127.0.0.1"),
+        port=_env_int("WEB_PORT", 8000),
+        refresh_ms=_env_int("WEB_REFRESH_MS", 1500),
+        levels_per_side=_env_int("WEB_LEVELS_PER_SIDE", 30),
+    )
+
     telegram = TelegramCfg(
         enabled=_env_bool("TG_ENABLED", True),
         bot_token=os.environ.get("TG_BOT_TOKEN") or None,
@@ -245,6 +302,8 @@ def load(env_file: str | os.PathLike[str] | None = ".env") -> Settings:
         detector=detector,
         orderbook=orderbook,
         cooldown=cooldown,
+        iceberg=iceberg,
+        web=web,
         telegram=telegram,
         persistence=persistence,
         log_level=_env_str("LOG_LEVEL", "INFO"),

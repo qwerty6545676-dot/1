@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Wall Scanner — heatmap</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #7d8590;
+    --green: #3fb950;
+    --red: #f85149;
+    --gold: #d29922;
+    --panel: #161b22;
+    --line: #30363d;
+  }
+  html, body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0; padding: 0;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: 1fr 320px; gap: 0; }
+  #grid { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px; font-size: 12px;
+  }
+  .card .head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 6px;
+  }
+  .card .sym { font-weight: 700; font-size: 14px; }
+  .card .mode {
+    font-size: 10px; padding: 2px 6px; border-radius: 3px;
+    background: #21262d; color: var(--muted); margin-left: 6px;
+  }
+  .card .mid { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ladder { font-variant-numeric: tabular-nums; line-height: 16px; font-size: 11px; }
+  .ladder .row {
+    display: grid; grid-template-columns: 1fr 1fr 1fr;
+    gap: 4px; padding: 0 2px;
+    position: relative;
+  }
+  .ladder .row .px { text-align: left; }
+  .ladder .row .qty { text-align: right; color: var(--muted); }
+  .ladder .row .usd { text-align: right; }
+  .ladder .row .bar {
+    position: absolute; right: 0; top: 0; bottom: 0;
+    z-index: 0; pointer-events: none;
+    opacity: 0.35;
+  }
+  .ladder .row .px, .ladder .row .qty, .ladder .row .usd { position: relative; z-index: 1; }
+  .ask .bar { background: var(--red); }
+  .bid .bar { background: var(--green); }
+  .mid-row { text-align: center; color: var(--gold); padding: 4px 0;
+             border-top: 1px dashed var(--line); border-bottom: 1px dashed var(--line); }
+  .wall-marker { color: var(--gold); font-weight: bold; }
+  .wall-pending { opacity: 0.5; }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); padding: 12px; }
+  aside h2 { font-size: 13px; margin: 0 0 6px; color: var(--muted); }
+  .events { font-size: 11px; line-height: 1.5; max-height: 50vh; overflow-y: auto; }
+  .ev { padding: 4px 0; border-bottom: 1px dashed var(--line); display: grid; grid-template-columns: auto 1fr auto; gap: 8px; }
+  .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ev .b-bid, .ev .b-bid-side { color: var(--green); }
+  .ev .b-ask, .ev .b-ask-side { color: var(--red); }
+  .ev .k { font-weight: 600; }
+  .icebergs h2 { margin-top: 16px; }
+  .ic { padding: 4px 0; border-bottom: 1px dashed var(--line); display: grid; grid-template-columns: auto 1fr auto; gap: 8px; }
+  .ic .sym { font-weight: 600; }
+  .ic .flow { color: var(--gold); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧱 Wall Scanner Heatmap</h1>
+  <div class="meta">
+    <span id="symcount">—</span> symbols ·
+    refresh every <span id="refresh">—</span> ms ·
+    last update <span id="lastupd">—</span>
+  </div>
+</header>
+<main>
+  <div id="grid"><div class="empty">loading…</div></div>
+  <aside>
+    <h2>Recent wall events</h2>
+    <div class="events" id="events"><div class="empty">no events yet</div></div>
+    <div class="icebergs">
+      <h2>🧊 Recent icebergs</h2>
+      <div class="events" id="icebergs"><div class="empty">no icebergs yet</div></div>
+    </div>
+  </aside>
+</main>
+<script>
+const fmtUsd = (u) => u >= 1_000_000 ? `$${(u/1_000_000).toFixed(2)}M`
+                    : u >= 1_000     ? `$${(u/1_000).toFixed(0)}k`
+                    : `$${u.toFixed(0)}`;
+const fmtPx  = (p) => p >= 100 ? p.toFixed(2)
+                    : p >= 1   ? p.toFixed(4)
+                    :            p.toFixed(6);
+const fmtQty = (q) => q >= 1000 ? q.toLocaleString(undefined,{maximumFractionDigits:0})
+                    : q >= 1    ? q.toFixed(2)
+                    :             q.toFixed(4);
+const fmtTs  = (ts) => {
+  const d = new Date(ts);
+  return d.toLocaleTimeString();
+};
+
+function renderLadder(symData) {
+  const wallByPrice = new Map();
+  for (const w of (symData.walls || [])) {
+    wallByPrice.set(w.price, w);
+  }
+  const allBidUsd = symData.bids.map(l => l.usd);
+  const allAskUsd = symData.asks.map(l => l.usd);
+  const maxUsd = Math.max(1, ...allBidUsd, ...allAskUsd);
+
+  function row(level, side) {
+    const w = wallByPrice.get(level.price);
+    const isWall = !!w;
+    const wallActive = w && w.state === "ACTIVE";
+    const wallPending = w && !wallActive;
+    const widthPct = Math.min(100, (level.usd / maxUsd) * 100);
+    const cls = `row ${side}` + (wallPending ? ` wall-pending` : ``);
+    const marker = isWall ? `<span class="wall-marker">${wallActive ? "▌" : "·"}</span>` : "";
+    return `<div class="${cls}">
+      <span class="bar" style="width:${widthPct}%"></span>
+      <span class="px">${marker}${fmtPx(level.price)}</span>
+      <span class="qty">${fmtQty(level.qty)}</span>
+      <span class="usd">${fmtUsd(level.usd)}</span>
+    </div>`;
+  }
+
+  const asksHtml = symData.asks.slice().reverse().map(l => row(l, "ask")).join("");
+  const bidsHtml = symData.bids.map(l => row(l, "bid")).join("");
+  const distAsk = symData.best_ask && symData.mid
+    ? ` (+${(((symData.best_ask - symData.mid) / symData.mid) * 100).toFixed(3)}%)` : "";
+  const distBid = symData.best_bid && symData.mid
+    ? ` (-${(((symData.mid - symData.best_bid) / symData.mid) * 100).toFixed(3)}%)` : "";
+  return `
+    <div class="card">
+      <div class="head">
+        <div><span class="sym">${symData.symbol}</span><span class="mode">${symData.mode}</span></div>
+        <div class="mid">mid ${fmtPx(symData.mid)}</div>
+      </div>
+      <div class="ladder">
+        ${asksHtml}
+        <div class="row mid-row">— mid ${fmtPx(symData.mid)} —${distAsk}${distBid}</div>
+        ${bidsHtml}
+      </div>
+    </div>`;
+}
+
+function renderEvents(events) {
+  if (!events.length) return `<div class="empty">no events yet</div>`;
+  return events.map(e => {
+    const sideCls = e.side === "bid" ? "b-bid" : "b-ask";
+    const kindEmoji = e.kind === "appeared" ? (e.side === "bid" ? "🟩" : "🟥")
+                    : e.kind === "cancelled" ? "⬜️"
+                    : e.kind === "executed" ? "💥" : "•";
+    return `<div class="ev">
+      <span class="t">${fmtTs(e.ts_ms)}</span>
+      <span><span class="k">${kindEmoji}</span> ${e.symbol} <span class="${sideCls}">${e.side}</span> @ ${fmtPx(e.price)}</span>
+      <span>${fmtUsd(e.usd_value)}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderIcebergs(events) {
+  if (!events.length) return `<div class="empty">no icebergs yet</div>`;
+  return events.map(e => {
+    const sideCls = e.side === "bid" ? "b-bid-side" : "b-ask-side";
+    return `<div class="ic">
+      <span class="t">${fmtTs(e.ts_ms)}</span>
+      <span><span class="sym">🧊 ${e.symbol}</span> <span class="${sideCls}">${e.side}</span> @ ${fmtPx(e.price)} (${e.regen_count}×)</span>
+      <span class="flow">${fmtUsd(e.cumulative_usd)}</span>
+    </div>`;
+  }).join("");
+}
+
+let refreshMs = 1500;
+async function tick() {
+  try {
+    const r = await fetch("/api/state");
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    refreshMs = data.refresh_ms || refreshMs;
+    document.getElementById("refresh").textContent = refreshMs;
+    document.getElementById("symcount").textContent = data.symbols.length;
+    document.getElementById("lastupd").textContent = new Date().toLocaleTimeString();
+
+    const grid = document.getElementById("grid");
+    if (!data.symbols.length) {
+      grid.innerHTML = `<div class="empty">waiting for book sync…</div>`;
+    } else {
+      grid.innerHTML = data.symbols.map(renderLadder).join("");
+    }
+    document.getElementById("events").innerHTML   = renderEvents(data.events || []);
+    document.getElementById("icebergs").innerHTML = renderIcebergs(data.icebergs || []);
+  } catch (e) {
+    document.getElementById("lastupd").textContent = "ERROR: " + e.message;
+  } finally {
+    setTimeout(tick, refreshMs);
+  }
+}
+tick();
+</script>
+</body>
+</html>
