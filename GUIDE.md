@@ -573,8 +573,9 @@ location / {
 - **Поле поиска** — фильтрует карточки по подстроке тикера. Ввёл `BTC`
   — остался только BTCUSDT. Очистил — снова все.
 - **Кнопка «Export PNG»** — рендерит весь дашборд в PNG-файл и скачивает
-  его (`heatmap-YYYY-MM-DD-HH-MM-SS.png`). Под капотом — SVG
-  `foreignObject` → `canvas.toBlob()`, без сторонних зависимостей.
+  его (`wall-scanner-YYYY-MM-DD-HH-MM-SS.png`). Под капотом — `html2canvas`
+  (вендорится в `walls/static/html2canvas.min.js`, никаких CDN или сетевых
+  зависимостей в рантайме).
 
 В каждой карточке символа теперь есть **спарклайн** — мини-график mid-цены
 за последние ~5 минут (≤60 точек, downsample через bucket-averaging):

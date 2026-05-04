@@ -163,6 +163,7 @@
     </div>
   </aside>
 </main>
+<script src="/static/html2canvas.min.js"></script>
 <script>
 const fmtUsd = (u) => u >= 1_000_000 ? `$${(u/1_000_000).toFixed(2)}M`
                     : u >= 1_000     ? `$${(u/1_000).toFixed(0)}k`
@@ -380,52 +381,25 @@ document.getElementById("search").addEventListener("input", (e) => {
   tick();
 });
 
-// ----- PNG export (SVG foreignObject + canvas) ----------------------
+// ----- PNG export via html2canvas -----------------------------------
 async function exportPng() {
   const btn = document.getElementById("exportBtn");
   btn.disabled = true;
   const oldLabel = btn.textContent;
   btn.textContent = "rendering…";
   try {
-    const root = document.getElementById("app");
-    const styleNode = document.querySelector("style");
-    const rect = root.getBoundingClientRect();
-    const w = Math.max(640, Math.ceil(rect.width));
-    const h = Math.max(480, Math.ceil(rect.height));
-
-    // Inline-clone the page section we want to export, plus its CSS.
-    const clone = root.cloneNode(true);
-    // Restore vertical scroll position visually (foreignObject doesn't scroll).
-    const xml =
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
-      `<foreignObject width="100%" height="100%">` +
-      `<div xmlns="http://www.w3.org/1999/xhtml" style="background:#0d1117;color:#e6edf3;width:${w}px;">` +
-      `<style>${styleNode.textContent}</style>` +
-      clone.outerHTML +
-      `</div>` +
-      `</foreignObject>` +
-      `</svg>`;
-
-    const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = (e) => reject(new Error("svg-render failed: " + e.message));
-      img.src = url;
+    if (typeof html2canvas !== "function") {
+      throw new Error("html2canvas script not loaded");
+    }
+    const target = document.body;
+    const canvas = await html2canvas(target, {
+      backgroundColor: "#0d1117",
+      scale: window.devicePixelRatio > 1 ? 2 : 1,
+      useCORS: true,
+      logging: false,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
     });
-    const scale = window.devicePixelRatio > 1 ? 2 : 1;
-    const canvas = document.createElement("canvas");
-    canvas.width = w * scale;
-    canvas.height = h * scale;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#0d1117";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.scale(scale, scale);
-    ctx.drawImage(img, 0, 0);
-    URL.revokeObjectURL(url);
-
     const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!pngBlob) throw new Error("canvas-toBlob returned null");
     const pngUrl = URL.createObjectURL(pngBlob);
@@ -438,7 +412,7 @@ async function exportPng() {
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(pngUrl), 1000);
   } catch (e) {
-    alert("PNG export failed: " + e.message + "\nTry switching tab in focus and retrying.");
+    alert("PNG export failed: " + e.message);
     console.error(e);
   } finally {
     btn.disabled = false;

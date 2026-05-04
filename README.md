@@ -145,8 +145,8 @@ wall-scanner
 - **Mode chips + symbol search** in the toolbar — purely client-side
   filter; no API refetch, just hide cards.
 - **Export PNG** button — renders the entire dashboard to a PNG file
-  using SVG `foreignObject` → `canvas.toBlob()` (no external libs like
-  html2canvas).
+  using `html2canvas` (vendored at `walls/static/html2canvas.min.js`,
+  no CDN or runtime network deps).
 - **Anti-spoof counter** in the header (`🧊 confirmed: N · rejected: M`)
   when `ICEBERG_REQUIRE_TRADE_CONFIRMATION=true`.
 
