@@ -83,11 +83,15 @@ def test_mid_history_records_and_evicts() -> None:
     book.apply_snapshot(_snapshot(1000))
     book.record_mid(1_000)
     book.record_mid(30_000)
-    # Both within 60s window
+    # Both within retention window
     assert len(book.mid_history) == 2
-    book.record_mid(100_000)
-    # 1_000 should be evicted (older than 100_000 - 60_000 = 40_000)
-    assert all(ts >= 40_000 for ts, _ in book.mid_history)
+    # Far in the future: every sample older than RETENTION should be evicted.
+    far_future = 1_000 + OrderBook.MID_HISTORY_RETENTION_MS + 1_000
+    book.record_mid(far_future)
+    cutoff = far_future - OrderBook.MID_HISTORY_RETENTION_MS
+    assert all(ts >= cutoff for ts, _ in book.mid_history)
+    # Only the most recent sample should remain.
+    assert any(ts == far_future for ts, _ in book.mid_history)
 
 
 def test_crossed_detects_drop_for_bid_wall() -> None:

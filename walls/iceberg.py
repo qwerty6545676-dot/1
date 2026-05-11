@@ -32,6 +32,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .settings import IcebergCfg
+from .trade_buffer import TradeBuffer
 
 
 @dataclass(frozen=True)
@@ -81,14 +82,24 @@ class IcebergDetector:
     """Tracks level updates and emits iceberg events.
 
     Single-threaded by design — it lives inside the scanner's asyncio loop.
+    Optionally accepts a :class:`TradeBuffer` to gate regen counting on
+    actual fills (anti-spoofing).
     """
 
-    def __init__(self, cfg: IcebergCfg) -> None:
+    def __init__(
+        self,
+        cfg: IcebergCfg,
+        trade_buffer: TradeBuffer | None = None,
+    ) -> None:
         self.cfg = cfg
+        self.trade_buffer = trade_buffer
         # symbol -> (side, price) -> hist
         self._levels: dict[str, dict[tuple[str, float], _LevelHist]] = {}
         # fingerprint -> last_emit_ts_ms (cooldown)
         self._emitted: dict[str, int] = {}
+        # Counters surfaced to the dashboard / metrics.
+        self.confirmed_count: int = 0
+        self.rejected_spoof_count: int = 0
 
     # ------------------------------------------------------------------- core
     def observe_change(
@@ -146,6 +157,19 @@ class IcebergDetector:
                 lo = hist.eaten_qty * self.cfg.regen_match_lo
                 hi = hist.eaten_qty * self.cfg.regen_match_hi
                 if lo <= new_qty <= hi:
+                    confirmed = self._confirm_with_trades(
+                        symbol, side, price, hist.eaten_at_ms, hist.eaten_qty,
+                    )
+                    if not confirmed:
+                        # Spoof / cancel-and-replace: reset state so the level
+                        # is treated as fresh, do not count as regen.
+                        self.rejected_spoof_count += 1
+                        hist.eaten_at_ms = 0
+                        hist.eaten_qty = 0.0
+                        hist.nominal_qty = new_qty
+                        hist.nominal_usd = new_usd
+                        return None
+                    self.confirmed_count += 1
                     hist.regen_count += 1
                     hist.cumulative_qty += hist.eaten_qty
                     hist.cumulative_usd += hist.eaten_qty * price
@@ -199,6 +223,32 @@ class IcebergDetector:
         return emitted
 
     # ---------------------------------------------------------------- helpers
+    def _confirm_with_trades(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        eat_ts_ms: int,
+        eaten_qty: float,
+    ) -> bool:
+        """Return True if the eat is confirmed by a real trade at the level.
+
+        When ``require_trade_confirmation`` is False, every regen is confirmed.
+        When the buffer is missing, treat as confirmed (degraded mode — better
+        than dropping all events when the trade stream is offline).
+        """
+        if not self.cfg.require_trade_confirmation:
+            return True
+        if self.trade_buffer is None:
+            return True
+        min_qty = max(0.0, eaten_qty * self.cfg.trade_min_qty_ratio)
+        return self.trade_buffer.has_fill(
+            symbol, side, price,
+            center_ts_ms=eat_ts_ms,
+            window_ms=self.cfg.trade_window_ms,
+            min_qty=min_qty,
+        )
+
     def _cooldown_ok(self, symbol: str, side: str, price: float, ts_ms: int) -> bool:
         fp = f"{symbol}|{side}|{price:g}|iceberg"
         prev = self._emitted.get(fp)

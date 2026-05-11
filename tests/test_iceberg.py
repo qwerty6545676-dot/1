@@ -6,6 +6,7 @@ import pytest
 
 from walls.iceberg import IcebergDetector
 from walls.settings import IcebergCfg
+from walls.trade_buffer import TradeBuffer
 
 
 def _cfg(**overrides: object) -> IcebergCfg:
@@ -20,6 +21,10 @@ def _cfg(**overrides: object) -> IcebergCfg:
         min_regens=3,
         lookback_sec=60.0,
         cooldown_ttl_sec=300.0,
+        # Anti-spoof gate is opt-in for the v1 tests below; v2 tests turn it on.
+        require_trade_confirmation=False,
+        trade_window_ms=2000,
+        trade_min_qty_ratio=0.30,
     )
     base.update(overrides)
     return IcebergCfg(**base)  # type: ignore[arg-type]
@@ -167,3 +172,132 @@ def test_gc_drops_stale_levels() -> None:
     det.gc(2_000 + 10 * 60_000)
     # Symbol bucket should be empty.
     assert sym not in det._levels or not det._levels[sym]
+
+
+# ----------------------------------------------------------- v2: anti-spoofing
+def test_anti_spoof_rejects_regen_without_trade() -> None:
+    """When require_trade_confirmation=True, regens without matching fills
+    are rejected as spoofs and must NOT increment the regen counter."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True, trade_window_ms=2000)
+    buf = TradeBuffer(retention_ms=10_000)  # empty buffer = no trades seen
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, side, price, qty = "BTCUSDT", "bid", 80000.0, 1.0
+
+    # 5 eat→regen cycles without any matching trades.
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    for i in range(5):
+        det.observe_change(sym, side, price, qty, 0.05, 2_000 + i * 1000)
+        ev = det.observe_change(sym, side, price, 0.05, qty, 2_500 + i * 1000)
+        assert ev is None
+    assert det.confirmed_count == 0
+    assert det.rejected_spoof_count == 5
+
+
+def test_anti_spoof_accepts_regen_with_trade() -> None:
+    """A regen that follows a real trade at the level must be counted."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True, trade_window_ms=2000,
+               trade_min_qty_ratio=0.30)
+    buf = TradeBuffer(retention_ms=10_000)
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, side, price, qty = "BTCUSDT", "bid", 80000.0, 1.0
+
+    # Baseline
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    # Cycle 1: eat at 2000 ms, real trade at 2050 ms.
+    det.observe_change(sym, side, price, qty, 0.05, 2_000)
+    buf.record(sym, price, qty * 0.5, 2_050, buyer_is_maker=True)  # bid hit
+    ev1 = det.observe_change(sym, side, price, 0.05, qty, 2_500)
+    assert ev1 is None
+
+    # Cycle 2: eat at 3000 ms, real trade at 3100 ms.
+    det.observe_change(sym, side, price, qty, 0.05, 3_000)
+    buf.record(sym, price, qty * 0.5, 3_100, buyer_is_maker=True)
+    ev2 = det.observe_change(sym, side, price, 0.05, qty, 3_500)
+
+    assert ev2 is not None
+    assert ev2.regen_count == 2
+    assert det.confirmed_count == 2
+    assert det.rejected_spoof_count == 0
+
+
+def test_anti_spoof_rejects_when_trade_qty_too_small() -> None:
+    """A trade smaller than ``trade_min_qty_ratio * eaten_qty`` must NOT confirm."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True, trade_window_ms=2000,
+               trade_min_qty_ratio=0.50)
+    buf = TradeBuffer(retention_ms=10_000)
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, side, price, qty = "ETHUSDT", "ask", 2500.0, 10.0
+
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    # Eat at 2000ms; trade only 10% (need 50%).
+    det.observe_change(sym, side, price, qty, 0.5, 2_000)
+    buf.record(sym, price, qty * 0.10, 2_100, buyer_is_maker=False)  # ask hit
+    ev = det.observe_change(sym, side, price, 0.5, qty, 2_500)
+    assert ev is None
+    assert det.rejected_spoof_count == 1
+    assert det.confirmed_count == 0
+
+
+def test_anti_spoof_rejects_when_trade_outside_window() -> None:
+    """A trade outside ``trade_window_ms`` of the eat must NOT confirm."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True, trade_window_ms=200)
+    buf = TradeBuffer(retention_ms=10_000)
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, side, price, qty = "BTCUSDT", "bid", 80000.0, 1.0
+
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    det.observe_change(sym, side, price, qty, 0.05, 2_000)
+    # Trade is 500 ms after eat — outside the 200 ms window.
+    buf.record(sym, price, qty, 2_500, buyer_is_maker=True)
+    ev = det.observe_change(sym, side, price, 0.05, qty, 2_600)
+    assert ev is None
+    assert det.rejected_spoof_count == 1
+
+
+def test_anti_spoof_disabled_by_flag() -> None:
+    """``require_trade_confirmation=False`` keeps v1 behaviour even with empty buffer."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=False)
+    buf = TradeBuffer(retention_ms=10_000)
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, side, price, qty = "BTCUSDT", "bid", 80000.0, 1.0
+
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    det.observe_change(sym, side, price, qty, 0.05, 2_000)
+    ev1 = det.observe_change(sym, side, price, 0.05, qty, 2_500)
+    assert ev1 is None
+    det.observe_change(sym, side, price, qty, 0.05, 3_000)
+    ev2 = det.observe_change(sym, side, price, 0.05, qty, 3_500)
+    assert ev2 is not None  # fired, as in v1
+    assert det.rejected_spoof_count == 0
+
+
+def test_anti_spoof_no_buffer_degrades_gracefully() -> None:
+    """Anti-spoof on but no buffer attached → treat as confirmed (degraded mode)."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True)
+    det = IcebergDetector(cfg, trade_buffer=None)
+    sym, side, price, qty = "BTCUSDT", "bid", 80000.0, 1.0
+
+    det.observe_change(sym, side, price, 0.0, qty, 1_000)
+    det.observe_change(sym, side, price, qty, 0.05, 2_000)
+    ev1 = det.observe_change(sym, side, price, 0.05, qty, 2_500)
+    assert ev1 is None
+    det.observe_change(sym, side, price, qty, 0.05, 3_000)
+    ev2 = det.observe_change(sym, side, price, 0.05, qty, 3_500)
+    assert ev2 is not None  # would have fired in v1
+
+
+def test_anti_spoof_uses_correct_side() -> None:
+    """Ask-side fills (buyer_is_maker=False) must NOT confirm a bid-side eat."""
+    cfg = _cfg(min_regens=2, require_trade_confirmation=True, trade_window_ms=2000,
+               trade_min_qty_ratio=0.30)
+    buf = TradeBuffer(retention_ms=10_000)
+    det = IcebergDetector(cfg, trade_buffer=buf)
+    sym, price, qty = "BTCUSDT", 80000.0, 1.0
+
+    det.observe_change(sym, "bid", price, 0.0, qty, 1_000)
+    det.observe_change(sym, "bid", price, qty, 0.05, 2_000)
+    # Trade hits the ASK at this price; the BID eat must not confirm.
+    buf.record(sym, price, qty, 2_050, buyer_is_maker=False)
+    ev = det.observe_change(sym, "bid", price, 0.05, qty, 2_500)
+    assert ev is None
+    assert det.rejected_spoof_count == 1

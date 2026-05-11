@@ -134,6 +134,10 @@ def test_iceberg_defaults() -> None:
     assert ic.regen_window_sec == 10.0
     assert ic.min_regens == 4
     assert ic.cooldown_ttl_sec == 1800.0
+    # v2: anti-spoof gate is on by default.
+    assert ic.require_trade_confirmation is True
+    assert ic.trade_window_ms == 2000
+    assert ic.trade_min_qty_ratio == 0.30
 
 
 def test_iceberg_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,6 +146,17 @@ def test_iceberg_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     s = load(env_file=None)
     assert s.iceberg.enabled is False
     assert s.iceberg.min_regens == 8
+
+
+def test_iceberg_anti_spoof_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trade confirmation is opt-out for users who can't afford another WS conn."""
+    monkeypatch.setenv("ICEBERG_REQUIRE_TRADE_CONFIRMATION", "false")
+    monkeypatch.setenv("ICEBERG_TRADE_WINDOW_MS", "500")
+    monkeypatch.setenv("ICEBERG_TRADE_MIN_QTY_RATIO", "0.10")
+    s = load(env_file=None)
+    assert s.iceberg.require_trade_confirmation is False
+    assert s.iceberg.trade_window_ms == 500
+    assert s.iceberg.trade_min_qty_ratio == 0.10
 
 
 def test_web_defaults_disabled() -> None:

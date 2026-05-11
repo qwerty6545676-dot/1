@@ -100,7 +100,24 @@ ICEBERG_REGEN_MATCH_HI=1.4
 ICEBERG_MIN_REGENS=4
 ICEBERG_LOOKBACK_SEC=600
 ICEBERG_COOLDOWN_TTL_SEC=1800
+
+# v2: anti-spoofing — confirm every regen with a real trade
+ICEBERG_REQUIRE_TRADE_CONFIRMATION=true
+ICEBERG_TRADE_WINDOW_MS=2000
+ICEBERG_TRADE_MIN_QTY_RATIO=0.30
 ```
+
+**Anti-spoofing (v2).** The original detector counts a level as "iceberg"
+whenever it keeps refilling — but a spoofer can imitate that with
+`cancel/replace` games, never actually executing. With
+`ICEBERG_REQUIRE_TRADE_CONFIRMATION=true` (the default), the scanner
+opens a parallel `<symbol>@trade` WebSocket and only counts a regen if a
+**real trade** was observed at that exact level within
+`±ICEBERG_TRADE_WINDOW_MS` and the trade's qty was at least
+`ICEBERG_TRADE_MIN_QTY_RATIO × eaten_qty`. Cancel/replace events that
+weren't backed by an actual fill are dropped as spoofs and counted on a
+separate `rejected_spoof` counter. Set the flag to `false` to fall back
+to v1 behaviour (one WS per symbol, more false positives).
 
 See [GUIDE.md §8](GUIDE.md#8-iceberg-detection--поиск-скрытых-китов)
 for the full algorithm.
@@ -119,6 +136,19 @@ pip install -e ".[web]"
 wall-scanner
 # open http://127.0.0.1:8000/
 ```
+
+**v2 features:**
+
+- **Mid-price sparkline** in every symbol card (≤60 points over the last
+  ~5 minutes, bucket-averaged downsample, colour-coded green/red/blue
+  with a Δ% delta).
+- **Mode chips + symbol search** in the toolbar — purely client-side
+  filter; no API refetch, just hide cards.
+- **Export PNG** button — renders the entire dashboard to a PNG file
+  using `html2canvas` (vendored at `walls/static/html2canvas.min.js`,
+  no CDN or runtime network deps).
+- **Anti-spoof counter** in the header (`🧊 confirmed: N · rejected: M`)
+  when `ICEBERG_REQUIRE_TRADE_CONFIRMATION=true`.
 
 The dashboard is **localhost-only by default** and has no authentication —
 do not expose `WEB_HOST=0.0.0.0` to the internet without putting a reverse

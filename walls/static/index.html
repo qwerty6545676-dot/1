@@ -11,7 +11,9 @@
     --green: #3fb950;
     --red: #f85149;
     --gold: #d29922;
+    --blue: #58a6ff;
     --panel: #161b22;
+    --panel2: #1c2128;
     --line: #30363d;
   }
   html, body {
@@ -27,6 +29,41 @@
   }
   header h1 { margin: 0; font-size: 16px; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 12px; }
+  header .stats { color: var(--muted); font-size: 11px; margin-left: 12px; }
+  header .stats b { color: var(--fg); font-weight: 600; }
+  header .stats .sp { color: var(--green); }
+  header .stats .rj { color: var(--red); }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px; background: var(--panel2);
+    border-bottom: 1px solid var(--line);
+    font-size: 12px; flex-wrap: wrap;
+  }
+  .toolbar .group { display: flex; align-items: center; gap: 6px; }
+  .toolbar .group label { color: var(--muted); margin-right: 4px; }
+  .toolbar input[type="text"] {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 4px 8px; font: inherit;
+    min-width: 140px;
+  }
+  .toolbar input[type="text"]:focus { outline: 1px solid var(--blue); border-color: var(--blue); }
+  .toolbar button {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 4px 10px; cursor: pointer;
+    font: inherit;
+  }
+  .toolbar button:hover { border-color: var(--blue); color: var(--blue); }
+  .toolbar button:disabled { opacity: 0.5; cursor: wait; }
+  .toolbar .modechip {
+    padding: 2px 8px; border: 1px solid var(--line);
+    border-radius: 12px; cursor: pointer; user-select: none;
+    color: var(--muted);
+  }
+  .toolbar .modechip.on { color: var(--fg); border-color: var(--blue); background: #1f2937; }
+
   main { display: grid; grid-template-columns: 1fr 320px; gap: 0; }
   #grid { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
   .card {
@@ -43,6 +80,17 @@
     background: #21262d; color: var(--muted); margin-left: 6px;
   }
   .card .mid { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .card .spark { width: 100%; height: 28px; margin: 4px 0 6px; display: block; }
+  .card .spark .line { fill: none; stroke: var(--blue); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .card .spark .line.up { stroke: var(--green); }
+  .card .spark .line.down { stroke: var(--red); }
+  .card .spark .area { fill: var(--blue); opacity: 0.10; }
+  .card .spark .area.up { fill: var(--green); }
+  .card .spark .area.down { fill: var(--red); }
+  .card .delta { font-size: 10px; color: var(--muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .card .delta.up { color: var(--green); }
+  .card .delta.down { color: var(--red); }
+
   .ladder { font-variant-numeric: tabular-nums; line-height: 16px; font-size: 11px; }
   .ladder .row {
     display: grid; grid-template-columns: 1fr 1fr 1fr;
@@ -86,9 +134,25 @@
     <span id="symcount">—</span> symbols ·
     refresh every <span id="refresh">—</span> ms ·
     last update <span id="lastupd">—</span>
+    <span class="stats" id="icestats" hidden>
+      · 🧊 confirmed <b class="sp" id="ic-confirmed">0</b>
+      · spoof rejected <b class="rj" id="ic-rejected">0</b>
+    </span>
   </div>
 </header>
-<main>
+<div class="toolbar" id="toolbar">
+  <div class="group" id="modechips">
+    <label>modes:</label>
+  </div>
+  <div class="group">
+    <label for="search">filter:</label>
+    <input id="search" type="text" placeholder="symbol substring (e.g. SOL)" autocomplete="off">
+  </div>
+  <div class="group" style="margin-left:auto">
+    <button id="exportBtn" type="button" title="Save the dashboard view as PNG">📸 Export PNG</button>
+  </div>
+</div>
+<main id="app">
   <div id="grid"><div class="empty">loading…</div></div>
   <aside>
     <h2>Recent wall events</h2>
@@ -99,6 +163,7 @@
     </div>
   </aside>
 </main>
+<script src="/static/html2canvas.min.js"></script>
 <script>
 const fmtUsd = (u) => u >= 1_000_000 ? `$${(u/1_000_000).toFixed(2)}M`
                     : u >= 1_000     ? `$${(u/1_000).toFixed(0)}k`
@@ -114,6 +179,63 @@ const fmtTs  = (ts) => {
   return d.toLocaleTimeString();
 };
 
+// ----- filter state (persists across refreshes) ---------------------
+const FILTER = {
+  modes: new Set(),       // empty = all enabled
+  query: "",
+};
+const KNOWN_MODES = new Set();
+
+function rebuildModeChips() {
+  const wrap = document.getElementById("modechips");
+  // Remove old chips (keep the label).
+  while (wrap.children.length > 1) wrap.removeChild(wrap.lastChild);
+  for (const m of Array.from(KNOWN_MODES).sort()) {
+    const chip = document.createElement("span");
+    chip.className = "modechip" + (FILTER.modes.has(m) ? " on" : "");
+    chip.textContent = m;
+    chip.addEventListener("click", () => {
+      if (FILTER.modes.has(m)) FILTER.modes.delete(m);
+      else FILTER.modes.add(m);
+      rebuildModeChips();
+      tick();   // immediate re-render with current cached data via fetch
+    });
+    wrap.appendChild(chip);
+  }
+}
+
+function passesFilter(s) {
+  if (FILTER.modes.size > 0 && !FILTER.modes.has(s.mode)) return false;
+  if (FILTER.query && !s.symbol.toLowerCase().includes(FILTER.query.toLowerCase())) return false;
+  return true;
+}
+
+// ----- sparkline -----------------------------------------------------
+function renderSparkline(values) {
+  if (!values || values.length < 2) {
+    return `<svg class="spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>`;
+  }
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const range = hi - lo || 1;
+  const w = 100, h = 28;
+  const dx = w / (values.length - 1);
+  const pts = values.map((v, i) => {
+    const y = h - ((v - lo) / range) * (h - 4) - 2;
+    return `${(i * dx).toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const delta = values[values.length - 1] - values[0];
+  // Three-state colour: green up, red down, blue (default) for flat / no change.
+  const cls = delta > 0 ? "up" : delta < 0 ? "down" : "";
+  // Area path: line points + bottom-right + bottom-left corners
+  const area = `M0,${h} L${pts.split(" ").join(" L ")} L${w},${h} Z`;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <path class="area ${cls}" d="${area}"/>
+    <polyline class="line ${cls}" points="${pts}"/>
+  </svg>`;
+}
+
+// ----- per-card render ----------------------------------------------
 function renderLadder(symData) {
   const wallByPrice = new Map();
   for (const w of (symData.walls || [])) {
@@ -145,12 +267,24 @@ function renderLadder(symData) {
     ? ` (+${(((symData.best_ask - symData.mid) / symData.mid) * 100).toFixed(3)}%)` : "";
   const distBid = symData.best_bid && symData.mid
     ? ` (-${(((symData.mid - symData.best_bid) / symData.mid) * 100).toFixed(3)}%)` : "";
+
+  const spark = symData.sparkline || [];
+  let deltaHtml = "";
+  if (spark.length >= 2) {
+    const first = spark[0], last = spark[spark.length - 1];
+    const pct = ((last - first) / first) * 100;
+    const sign = pct > 0 ? "+" : "";
+    const cls = pct > 0 ? "up" : pct < 0 ? "down" : "";
+    deltaHtml = `<span class="delta ${cls}">${sign}${pct.toFixed(2)}%</span>`;
+  }
+
   return `
     <div class="card">
       <div class="head">
         <div><span class="sym">${symData.symbol}</span><span class="mode">${symData.mode}</span></div>
-        <div class="mid">mid ${fmtPx(symData.mid)}</div>
+        <div class="mid">mid ${fmtPx(symData.mid)}${deltaHtml}</div>
       </div>
+      ${renderSparkline(spark)}
       <div class="ladder">
         ${asksHtml}
         <div class="row mid-row">— mid ${fmtPx(symData.mid)} —${distAsk}${distBid}</div>
@@ -186,31 +320,108 @@ function renderIcebergs(events) {
   }).join("");
 }
 
+// ----- main loop ----------------------------------------------------
 let refreshMs = 1500;
+let _ticking = false;
 async function tick() {
+  if (_ticking) return;
+  _ticking = true;
   try {
     const r = await fetch("/api/state");
     if (!r.ok) throw new Error(r.status);
     const data = await r.json();
     refreshMs = data.refresh_ms || refreshMs;
+
+    // Track new modes for chip UI.
+    const modes = data.modes || [];
+    let modesChanged = false;
+    for (const m of modes) {
+      if (!KNOWN_MODES.has(m)) { KNOWN_MODES.add(m); modesChanged = true; }
+    }
+    if (modesChanged) rebuildModeChips();
+
     document.getElementById("refresh").textContent = refreshMs;
-    document.getElementById("symcount").textContent = data.symbols.length;
     document.getElementById("lastupd").textContent = new Date().toLocaleTimeString();
 
+    // Iceberg stats
+    const stats = data.iceberg_stats || {};
+    if (stats.anti_spoof) {
+      document.getElementById("icestats").hidden = false;
+      document.getElementById("ic-confirmed").textContent = stats.confirmed ?? 0;
+      document.getElementById("ic-rejected").textContent = stats.rejected_spoof ?? 0;
+    }
+
+    const filtered = (data.symbols || []).filter(passesFilter);
+    document.getElementById("symcount").textContent =
+      filtered.length === (data.symbols || []).length
+        ? filtered.length
+        : `${filtered.length}/${(data.symbols || []).length}`;
+
     const grid = document.getElementById("grid");
-    if (!data.symbols.length) {
-      grid.innerHTML = `<div class="empty">waiting for book sync…</div>`;
+    if (!filtered.length) {
+      const total = (data.symbols || []).length;
+      grid.innerHTML = total
+        ? `<div class="empty">no symbols match the filter</div>`
+        : `<div class="empty">waiting for book sync…</div>`;
     } else {
-      grid.innerHTML = data.symbols.map(renderLadder).join("");
+      grid.innerHTML = filtered.map(renderLadder).join("");
     }
     document.getElementById("events").innerHTML   = renderEvents(data.events || []);
     document.getElementById("icebergs").innerHTML = renderIcebergs(data.icebergs || []);
   } catch (e) {
     document.getElementById("lastupd").textContent = "ERROR: " + e.message;
   } finally {
+    _ticking = false;
     setTimeout(tick, refreshMs);
   }
 }
+
+document.getElementById("search").addEventListener("input", (e) => {
+  FILTER.query = e.target.value.trim();
+  tick();
+});
+
+// ----- PNG export via html2canvas -----------------------------------
+async function exportPng() {
+  const btn = document.getElementById("exportBtn");
+  btn.disabled = true;
+  const oldLabel = btn.textContent;
+  btn.textContent = "rendering…";
+  try {
+    if (typeof html2canvas !== "function") {
+      throw new Error("html2canvas script not loaded");
+    }
+    const target = document.body;
+    const canvas = await html2canvas(target, {
+      backgroundColor: "#0d1117",
+      scale: window.devicePixelRatio > 1 ? 2 : 1,
+      useCORS: true,
+      logging: false,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
+    });
+    const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!pngBlob) throw new Error("canvas-toBlob returned null");
+    const pngUrl = URL.createObjectURL(pngBlob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
+    a.download = `wall-scanner-${stamp}.png`;
+    a.href = pngUrl;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(pngUrl), 1000);
+  } catch (e) {
+    alert("PNG export failed: " + e.message);
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldLabel;
+  }
+}
+
+document.getElementById("exportBtn").addEventListener("click", exportPng);
+
 tick();
 </script>
 </body>
